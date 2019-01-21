@@ -82,35 +82,59 @@ class StarGAN(object) :
         x = tf.concat([x_init, c], axis=-1)
 
         with tf.variable_scope(scope, reuse=reuse) :
-            x = conv(x, channel, kernel=7, stride=1, pad=3, use_bias=False, scope='conv')
-            x = instance_norm(x, scope='ins_norm')
-            x = relu(x)
+            # image is (256 x 256 x input_c_dim)
+            e1 = instance_norm(conv(x, channel, name='g_e1_conv'))
+            # e1 is (128 x 128 x self.gf_dim)
+            e2 = instance_norm(conv(lrelu(e1), channel*2, name='g_e2_conv'), 'g_bn_e2')
+            # e2 is (64 x 64 x self.gf_dim*2)
+            e3 = instance_norm(conv(lrelu(e2), channel*4, name='g_e3_conv'), 'g_bn_e3')
+            # e3 is (32 x 32 x self.gf_dim*4)
+            e4 = instance_norm(conv(lrelu(e3), channel*8, name='g_e4_conv'), 'g_bn_e4')
+            # e4 is (16 x 16 x self.gf_dim*8)
+            e5 = instance_norm(conv(lrelu(e4), channel*8, name='g_e5_conv'), 'g_bn_e5')
+            # e5 is (8 x 8 x self.gf_dim*8)
+            e6 = instance_norm(conv(lrelu(e5), channel*8, name='g_e6_conv'), 'g_bn_e6')
+            # e6 is (4 x 4 x self.gf_dim*8)
+            e7 = instance_norm(conv(lrelu(e6), channel*8, name='g_e7_conv'), 'g_bn_e7')
+            # e7 is (2 x 2 x self.gf_dim*8)
+            e8 = instance_norm(conv(lrelu(e7), channel*8, name='g_e8_conv'), 'g_bn_e8')
+            # e8 is (1 x 1 x self.gf_dim*8)
 
-            # Down-Sampling
-            for i in range(2) :
-                x = conv(x, channel*2, kernel=4, stride=2, pad=1, use_bias=False, scope='conv_'+str(i))
-                x = instance_norm(x, scope='down_ins_norm_'+str(i))
-                x = relu(x)
+            d1 = deconv(tf.nn.relu(e8), channel*8, name='g_d1')
+            d1 = tf.nn.dropout(d1, dropout_rate)
+            d1 = tf.concat([instance_norm(d1, 'g_bn_d1'), e7], 3)
+            # d1 is (2 x 2 x self.gf_dim*8*2)
 
-                channel = channel * 2
+            d2 = deconv2d(tf.nn.relu(d1), channel*8, name='g_d2')
+            d2 = tf.nn.dropout(d2, dropout_rate)
+            d2 = tf.concat([instance_norm(d2, 'g_bn_d2'), e6], 3)
+            # d2 is (4 x 4 x self.gf_dim*8*2)
 
-            # Bottleneck
-            for i in range(self.n_res):
-                x = resblock(x, channel, use_bias=False, scope='resblock_' + str(i))
+            d3 = deconv2d(tf.nn.relu(d2), channel*8, name='g_d3')
+            d3 = tf.nn.dropout(d3, dropout_rate)
+            d3 = tf.concat([instance_norm(d3, 'g_bn_d3'), e5], 3)
+            # d3 is (8 x 8 x self.gf_dim*8*2)
 
-            # Up-Sampling
-            for i in range(2) :
-                x = deconv(x, channel//2, kernel=4, stride=2, use_bias=False, scope='deconv_'+str(i))
-                x = instance_norm(x, scope='up_ins_norm'+str(i))
-                x = relu(x)
+            d4 = deconv2d(tf.nn.relu(d3), channel*8, name='g_d4')
+            d4 = tf.concat([instance_norm(d4, 'g_bn_d4'), e4], 3)
+            # d4 is (16 x 16 x self.gf_dim*8*2)
 
-                channel = channel // 2
+            d5 = deconv2d(tf.nn.relu(d4), channel*4, name='g_d5')
+            d5 = tf.concat([instance_norm(d5, 'g_bn_d5'), e3], 3)
+            # d5 is (32 x 32 x self.gf_dim*4*2)
 
+            d6 = deconv2d(tf.nn.relu(d5), channel*2, name='g_d6')
+            d6 = tf.concat([instance_norm(d6, 'g_bn_d6'), e2], 3)
+            # d6 is (64 x 64 x self.gf_dim*2*2)
 
-            x = conv(x, channels=3, kernel=7, stride=1, pad=3, use_bias=False, scope='G_logit')
-            x = tanh(x)
+            d7 = deconv2d(tf.nn.relu(d6), channel, name='g_d7')
+            d7 = tf.concat([instance_norm(d7, 'g_bn_d7'), e1], 3)
+            # d7 is (128 x 128 x self.gf_dim*1*2)
 
-            return x
+            d8 = deconv2d(tf.nn.relu(d7), 3, name='g_d8')
+            # d8 is (256 x 256 x output_c_dim)
+
+            return tf.nn.tanh(d8)
 
     ##################################################################################
     # Discriminator
@@ -119,22 +143,17 @@ class StarGAN(object) :
     def discriminator(self, x_init, reuse=False, scope="discriminator"):
         with tf.variable_scope(scope, reuse=reuse) :
             channel = self.ch
-            x = conv(x_init, channel, kernel=4, stride=2, pad=1, use_bias=True, scope='conv_0')
-            x = lrelu(x, 0.01)
-
-            for i in range(1, self.n_dis):
-                x = conv(x, channel * 2, kernel=4, stride=2, pad=1, use_bias=True, scope='conv_' + str(i))
-                x = lrelu(x, 0.01)
-
-                channel = channel * 2
-
-            c_kernel = int(self.img_size / np.power(2, self.n_dis))
-
-            logit = conv(x, channels=1, kernel=3, stride=1, pad=1, use_bias=False, scope='D_logit')
-            c = conv(x, channels=self.c_dim, kernel=c_kernel, stride=1, use_bias=False, scope='D_label')
-            c = tf.reshape(c, shape=[-1, self.c_dim])
-
-            return logit, c
+            h0 = lrelu(conv(x_init, channel, name='d_h0_conv'))
+            # h0 is (128 x 128 x self.df_dim)
+            h1 = lrelu(instance_norm(conv(h0, channel*2, name='d_h1_conv'), 'd_bn1'))
+            # h1 is (64 x 64 x self.df_dim*2)
+            h2 = lrelu(instance_norm(conv(h1, channel*4, name='d_h2_conv'), 'd_bn2'))
+            # h2 is (32x 32 x self.df_dim*4)
+            h3 = lrelu(instance_norm(conv(h2, channel*8, s=1, name='d_h3_conv'), 'd_bn3'))
+            # h3 is (32 x 32 x self.df_dim*8)
+            h4 = conv(h3, 1, s=1, name='d_h3_pred')
+            # h4 is (32 x 32 x 1)
+            return h4
 
     ##################################################################################
     # Model
